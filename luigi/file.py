@@ -58,7 +58,7 @@ class LocalFileSystem(FileSystem):
         os.makedirs(path)
 
     def isdir(self, path):
-        os.path.isdir(path)
+        return os.path.isdir(path)
 
     def remove(self, path, recursive=True):
         if recursive and self.isdir(path):
@@ -113,6 +113,14 @@ class File(FileSystemTarget):
 
     def remove(self):
         self.fs.remove(self.path)
+
+    def copy(self, new_path, fail_if_exists=False):
+        if fail_if_exists and os.path.exists(new_path):
+            raise RuntimeError('Destination exists: %s' % new_path)
+        tmp = File(is_tmp=True)
+        tmp.open('w')
+        shutil.copy(self.path, tmp.fn)
+        tmp.move(new_path)
 
     @property
     def fn(self):

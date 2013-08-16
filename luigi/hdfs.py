@@ -46,14 +46,18 @@ def call_check(command):
     return stdout
 
 
-def use_cdh4_syntax():
+def get_hdfs_syntax():
     """
     CDH4 (hadoop 2+) has a slightly different syntax for interacting with
     hdfs via the command line. The default version is CDH4, but one can
-    override this setting with "cdh3" in the hadoop section of the config in
+    override this setting with "cdh3" or "apache1" in the hadoop section of the config in
     order to use the old syntax
     """
-    return configuration.get_config().get("hadoop", "version", "cdh4").lower() == "cdh4"
+    return configuration.get_config().get("hadoop", "version", "cdh4").lower()
+
+
+def load_hadoop_cmd():
+    return luigi.configuration.get_config().get('hadoop', 'command', 'hadoop')
 
 
 def tmppath(path=None):
@@ -61,21 +65,18 @@ def tmppath(path=None):
 
 
 class HdfsClient(FileSystem):
+    """This client uses Apache 2.x syntax for file system commands, which also matched CDH4"""
     def exists(self, path):
-        """ Use `hadoop fs -ls -d` to check file existence
-
-        `hadoop fs -test -e` can't be (reliably) used at this time since there
-        is no good way of distinguishing file non-existence of files
-        from errors when running the comman (same return code)
+        """ Use `hadoop fs -stat to check file existance
         """
 
-        cmd = ['hadoop', 'fs', '-ls', '-d', path]
+        cmd = [load_hadoop_cmd(), 'fs', '-stat', path]
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = p.communicate()
         if p.returncode == 0:
             return True
         else:
-            not_found_pattern = "^ls: `.*': No such file or directory$"
+            not_found_pattern = "^stat: `.*': No such file or directory$"
             not_found_re = re.compile(not_found_pattern)
             for line in stderr.split('\n'):
                 if not_found_re.match(line):
@@ -86,26 +87,25 @@ class HdfsClient(FileSystem):
         parent_dir = os.path.dirname(dest)
         if parent_dir != '' and not self.exists(parent_dir):
             self.mkdir(parent_dir)
-        call_check(['hadoop', 'fs', '-mv', path, dest])
+        call_check([load_hadoop_cmd(), 'fs', '-mv', path, dest])
 
     def remove(self, path, recursive=True, skip_trash=False):
         if recursive:
-            if use_cdh4_syntax():
-                cmd = ['hadoop', 'fs', '-rm', '-r']
-            else:
-                cmd = ['hadoop', 'fs', '-rmr']
+            cmd = [load_hadoop_cmd(), 'fs', '-rm', '-r']
         else:
-            cmd = ['hadoop', 'fs', '-rm']
+            cmd = [load_hadoop_cmd(), 'fs', '-rm']
+
         if skip_trash:
             cmd = cmd + ['-skipTrash']
+
         cmd = cmd + [path]
         call_check(cmd)
 
     def chmod(self, path, permissions, recursive=False):
         if recursive:
-            cmd = ['hadoop', 'fs', '-chmod', '-R', permissions, path]
+            cmd = [load_hadoop_cmd(), 'fs', '-chmod', '-R', permissions, path]
         else:
-            cmd = ['hadoop', 'fs', '-chmod', permissions, path]
+            cmd = [load_hadoop_cmd(), 'fs', '-chmod', permissions, path]
         call_check(cmd)
 
     def chown(self, path, owner, group, recursive=False):
@@ -115,37 +115,37 @@ class HdfsClient(FileSystem):
             group = ''
         ownership = "%s:%s" % (owner, group)
         if recursive:
-            cmd = ['hadoop', 'fs', '-chown', '-R', ownership, path]
+            cmd = [load_hadoop_cmd(), 'fs', '-chown', '-R', ownership, path]
         else:
-            cmd = ['hadoop', 'fs', '-chown', ownership, path]
+            cmd = [load_hadoop_cmd(), 'fs', '-chown', ownership, path]
         call_check(cmd)
 
     def count(self, path):
-        cmd = ['hadoop', 'fs', '-count', path]
+        cmd = [load_hadoop_cmd(), 'fs', '-count', path]
         stdout = call_check(cmd)
         (dir_count, file_count, content_size, ppath) = stdout.split()
         results = {'content_size': content_size, 'dir_count': dir_count, 'file_count': file_count}
         return results
 
     def copy(self, path, destination):
-        call_check(['hadoop', 'fs', '-cp', path, destination])
+        call_check([load_hadoop_cmd(), 'fs', '-cp', path, destination])
 
     def put(self, local_path, destination):
-        call_check(['hadoop', 'fs', '-put', local_path, destination])
+        call_check([load_hadoop_cmd(), 'fs', '-put', local_path, destination])
 
     def get(self, path, local_destination):
-        call_check(['hadoop', 'fs', '-get', path, local_destination])
+        call_check([load_hadoop_cmd(), 'fs', '-get', path, local_destination])
 
     def getmerge(self, path, local_destination, new_line=False):
         if new_line:
-            cmd = ['hadoop', 'fs', '-getmerge', '-nl', path, local_destination]
+            cmd = [load_hadoop_cmd(), 'fs', '-getmerge', '-nl', path, local_destination]
         else:
-            cmd = ['hadoop', 'fs', '-getmerge', path, local_destination]
+            cmd = [load_hadoop_cmd(), 'fs', '-getmerge', path, local_destination]
         call_check(cmd)
 
     def mkdir(self, path):
         try:
-            call_check(['hadoop', 'fs', '-mkdir', path])
+            call_check([load_hadoop_cmd(), 'fs', '-mkdir', path])
         except HDFSCliError, ex:
             if "File exists" in ex.stderr:
                 raise FileAlreadyExists(ex.stderr)
@@ -158,9 +158,9 @@ class HdfsClient(FileSystem):
             path = "."  # default to current/home catalog
 
         if recursive:
-            cmd = ['hadoop', 'fs', '-ls', '-R', path]
+            cmd = [load_hadoop_cmd(), 'fs', '-ls', '-R', path]
         else:
-            cmd = ['hadoop', 'fs', '-ls', path]
+            cmd = [load_hadoop_cmd(), 'fs', '-ls', path]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         lines = proc.stdout
 
@@ -194,7 +194,42 @@ class HdfsClient(FileSystem):
             else:
                 yield file
 
-client = HdfsClient()
+class HdfsClientCdh3(HdfsClient):
+    """This client uses CDH3 syntax for file system commands"""
+    def remove(self, path, recursive=True, skip_trash=False):
+        if recursive:
+            cmd = [load_hadoop_cmd(), 'fs', '-rmr']
+        else:
+            cmd = [load_hadoop_cmd(), 'fs', '-rm']
+
+        if skip_trash:
+            cmd = cmd + ['-skipTrash']
+
+        cmd = cmd + [path]
+        call_check(cmd)
+
+class HdfsClientApache1(HdfsClientCdh3):
+    """This client uses Apache 1.x syntax for file system commands,
+    which are similar to CDH3 except for the file existence check"""
+    def exists(self, path):
+        cmd = [load_hadoop_cmd(), 'fs', '-test', '-e', path]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = p.communicate()
+        if p.returncode == 0:
+            return True
+        elif p.returncode == 1:
+            return False
+        else:
+            raise HDFSCliError(cmd, p.returncode, stdout, stderr)
+
+if get_hdfs_syntax() == "cdh4":
+    client = HdfsClient()
+elif get_hdfs_syntax() == "cdh3":
+    client = HdfsClientCdh3()
+elif get_hdfs_syntax() == "apache1":
+    client = HdfsClientApache1()
+else:
+    raise Exception("Error: Unknown version specified in Hadoop version configuration parameter")
 
 exists = client.exists
 rename = client.rename
@@ -205,7 +240,7 @@ listdir = client.listdir
 
 class HdfsReadPipe(luigi.format.InputPipeProcessWrapper):
     def __init__(self, path):
-        super(HdfsReadPipe, self).__init__(['hadoop', 'fs', '-cat', path])
+        super(HdfsReadPipe, self).__init__([load_hadoop_cmd(), 'fs', '-cat', path])
 
 
 class HdfsAtomicWritePipe(luigi.format.OutputPipeProcessWrapper):
@@ -224,13 +259,13 @@ class HdfsAtomicWritePipe(luigi.format.OutputPipeProcessWrapper):
         self.path = path
         self.tmppath = tmppath(self.path)
         tmpdir = os.path.dirname(self.tmppath)
-        if use_cdh4_syntax():
-            if subprocess.Popen(['hadoop', 'fs', '-mkdir', '-p', tmpdir]).wait():
+        if get_hdfs_syntax() == "cdh4":
+            if subprocess.Popen([load_hadoop_cmd(), 'fs', '-mkdir', '-p', tmpdir]).wait():
                 raise RuntimeError("Could not create directory: %s" % tmpdir)
         else:
-            if not exists(tmpdir) and subprocess.Popen(['hadoop', 'fs', '-mkdir', tmpdir]).wait():
+            if not exists(tmpdir) and subprocess.Popen([load_hadoop_cmd(), 'fs', '-mkdir', tmpdir]).wait():
                 raise RuntimeError("Could not create directory: %s" % tmpdir)
-        super(HdfsAtomicWritePipe, self).__init__(['hadoop', 'fs', '-put', '-', self.tmppath])
+        super(HdfsAtomicWritePipe, self).__init__([load_hadoop_cmd(), 'fs', '-put', '-', self.tmppath])
 
     def abort(self):
         print "Aborting %s('%s'). Removing temporary file '%s'" % (self.__class__.__name__, self.path, self.tmppath)
@@ -248,7 +283,7 @@ class HdfsAtomicWriteDirPipe(luigi.format.OutputPipeProcessWrapper):
         self.path = path
         self.tmppath = tmppath(self.path)
         self.datapath = self.tmppath + ("/data%s" % data_extension)
-        super(HdfsAtomicWriteDirPipe, self).__init__(['hadoop', 'fs', '-put', '-', self.datapath])
+        super(HdfsAtomicWriteDirPipe, self).__init__([load_hadoop_cmd(), 'fs', '-put', '-', self.datapath])
 
     def abort(self):
         print "Aborting %s('%s'). Removing temporary dir '%s'" % (self.__class__.__name__, self.path, self.tmppath)
@@ -378,7 +413,7 @@ in luigi. Use target.path instead", stacklevel=2)
 
     def _is_writable(self, path):
         test_path = path + '.test_write_access-%09d' % random.randrange(1e10)
-        return_value = subprocess.call(['hadoop', 'fs', '-touchz', test_path])
+        return_value = subprocess.call([load_hadoop_cmd(), 'fs', '-touchz', test_path])
         if return_value != 0:
             return False
         else:

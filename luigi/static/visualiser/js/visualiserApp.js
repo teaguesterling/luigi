@@ -28,9 +28,11 @@ function visualiserApp(luigi) {
             taskName: taskName,
             taskParams: taskParams,
             displayTime: displayTime,
+            displayTimestamp : task.start_time,
             trackingUrl: task.trackingUrl,
             status: task.status,
-            graph: (task.status == "PENDING" || task.status == "RUNNING")
+            graph: (task.status == "PENDING" || task.status == "RUNNING" || task.status == "DONE"),
+            error: task.status == "FAILED"
         };
     }
 
@@ -55,7 +57,7 @@ function visualiserApp(luigi) {
 
     function renderTasks(tasks) {
         var displayTasks = $.map(tasks, taskToDisplayTask);
-        displayTasks.sort(function(a,b) { return a.taskId.localeCompare(b.taskId); });
+        displayTasks.sort(function(a,b) { return b.displayTimestamp - a.displayTimestamp; });
         var tasksByFamily = entryList(indexByProperty(displayTasks, "taskName"));
         tasksByFamily.sort(function(a,b) { return a.key.localeCompare(b.key); });
         return renderTemplate("rowTemplate", {tasks: tasksByFamily});
@@ -78,13 +80,23 @@ function visualiserApp(luigi) {
         if (hash) {
             var taskId = hash.substr(1);
             $("#graphContainer").hide();
+            $("#graphPlaceholder svg").empty();
+            $("#searchError").empty();
+            $("#searchError").removeClass();
             if (taskId != "g") {
                 luigi.getDependencyGraph(taskId, function(dependencyGraph) {
-                    $("#dependencyTitle").text(taskId);
                     $("#graphPlaceholder svg").empty();
-                    $("#graphPlaceholder").get(0).graph.updateData(dependencyGraph);
-                    $("#graphContainer").show();
-                    bindGraphEvents();
+                    $("#searchError").empty();
+                    $("#searchError").removeClass();
+                    if(dependencyGraph.length > 0) {
+                      $("#dependencyTitle").text(taskId);
+                      $("#graphPlaceholder").get(0).graph.updateData(dependencyGraph);
+                      $("#graphContainer").show();
+                      bindGraphEvents();
+                    } else {
+                      $("#searchError").addClass("alert alert-error")
+                      $("#searchError").append("Couldn't find task " + taskId)
+                    }
                 });
             }
             switchTab("dependencyGraph");
@@ -137,15 +149,18 @@ function visualiserApp(luigi) {
         
         luigi.getFailedTaskList(function(failedTasks) {
             luigi.getUpstreamFailedTaskList(function(upstreamFailedTasks) {
-            	luigi.getRunningTaskList(function(runningTasks) {
-                luigi.getPendingTaskList(function(pendingTasks) {
-                	$("#failedTasks").append(renderTasks(failedTasks));
-                	$("#upstreamFailedTasks").append(renderTasks(upstreamFailedTasks));
-                	$("#runningTasks").append(renderTasks(runningTasks));
-                  $("#pendingTasks").append(renderTasks(pendingTasks));
-                	bindListEvents();
-             	  });
-              });
+                luigi.getRunningTaskList(function(runningTasks) {
+                    luigi.getPendingTaskList(function(pendingTasks) {
+                        luigi.getDoneTaskList(function(doneTasks) {
+                            $("#failedTasks").append(renderTasks(failedTasks));
+                            $("#upstreamFailedTasks").append(renderTasks(upstreamFailedTasks));
+                            $("#runningTasks").append(renderTasks(runningTasks));
+                            $("#pendingTasks").append(renderTasks(pendingTasks));
+                            $("#doneTasks").append(renderTasks(doneTasks));
+                            bindListEvents();
+                        });
+                    });
+                });
             });
         });
         

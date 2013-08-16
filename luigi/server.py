@@ -27,6 +27,9 @@ import scheduler
 import pkg_resources
 import signal
 from rpc import RemoteSchedulerResponder
+import task_history
+import logging
+logger = logging.getLogger("luigi.server")
 
 
 def _create_scheduler():
@@ -34,7 +37,12 @@ def _create_scheduler():
     retry_delay = config.getfloat('scheduler', 'retry-delay', 900.0)
     remove_delay = config.getfloat('scheduler', 'remove-delay', 600.0)
     worker_disconnect_delay = config.getfloat('scheduler', 'worker-disconnect-delay', 60.0)
-    return scheduler.CentralPlannerScheduler(retry_delay, remove_delay, worker_disconnect_delay)
+    if config.getboolean('scheduler', 'record_task_history', False):
+        import db_task_history  # Needs sqlalchemy, thus imported here
+        task_history_impl = db_task_history.DbTaskHistory()
+    else:
+        task_history_impl = task_history.NopHistory()
+    return scheduler.CentralPlannerScheduler(retry_delay, remove_delay, worker_disconnect_delay, task_history_impl)
 
 
 class RPCHandler(tornado.web.RequestHandler):
@@ -51,7 +59,41 @@ class RPCHandler(tornado.web.RequestHandler):
             result = getattr(self._api, method)(**arguments)
             self.write({"response": result})  # wrap all json response in a dictionary
         else:
-            self.send_error(400)
+            self.send_error(404)
+
+
+class BaseTaskHistoryHandler(tornado.web.RequestHandler):
+    def initialize(self, api):
+        self._api = api
+
+    def get_template_path(self):
+        return 'luigi/templates'
+
+
+class RecentRunHandler(BaseTaskHistoryHandler):
+    def get(self):
+        tasks = self._api.task_history.find_latest_runs()
+        self.render("recent.html", tasks=tasks)
+
+
+class ByNameHandler(BaseTaskHistoryHandler):
+    def get(self, name):
+        tasks = self._api.task_history.find_all_by_name(name)
+        self.render("recent.html", tasks=tasks)
+
+
+class ByIdHandler(BaseTaskHistoryHandler):
+    def get(self, id):
+        task = self._api.task_history.find_task_by_id(id)
+        self.render("show.html", task=task)
+
+
+class ByParamsHandler(BaseTaskHistoryHandler):
+    def get(self, name):
+        payload = self.get_argument('data', default="{}")
+        arguments = json.loads(payload)
+        tasks = self._api.task_history.find_all_by_parameters(name, session=None, **arguments)
+        self.render("recent.html", tasks=tasks)
 
 
 class StaticFileHandler(tornado.web.RequestHandler):
@@ -71,11 +113,16 @@ class RootPathHandler(tornado.web.RequestHandler):
 
 
 def app(api):
-    api_app = tornado.web.Application([
+    handlers = [
         (r'/api/(.*)', RPCHandler, {"api": api}),
         (r'/static/(.*)', StaticFileHandler),
-        (r'/', RootPathHandler)
-    ])
+        (r'/', RootPathHandler),
+        (r'/history', RecentRunHandler, {'api': api}),
+        (r'/history/by_name/(.*?)', ByNameHandler, {'api': api}),
+        (r'/history/by_id/(.*?)', ByIdHandler, {'api': api}),
+        (r'/history/by_params/(.*?)', ByParamsHandler, {'api': api})
+    ]
+    api_app = tornado.web.Application(handlers, gzip=True)
     return api_app
 
 
@@ -92,19 +139,18 @@ def _init_api(sched, responder, api_port, address):
 
 def run(api_port=8082, address=None, scheduler=None, responder=None):
     """ Runs one instance of the API server """
-
     sched = scheduler or _create_scheduler()
     # load scheduler state
     sched.load()
 
     _init_api(sched, responder, api_port, address)
 
-    # prune work DAG every 10 seconds
-    pruner = tornado.ioloop.PeriodicCallback(sched.prune, 10000)
+    # prune work DAG every 60 seconds
+    pruner = tornado.ioloop.PeriodicCallback(sched.prune, 60000)
     pruner.start()
 
     def shutdown_handler(foo=None, bar=None):
-        print "api instance shutting down..."
+        logger.info("Scheduler instance shutting down")
         sched.dump()
         os._exit(0)
 
@@ -113,7 +159,7 @@ def run(api_port=8082, address=None, scheduler=None, responder=None):
     signal.signal(signal.SIGQUIT, shutdown_handler)
     atexit.register(shutdown_handler)
 
-    print "Launching API instance"
+    logger.info("Scheduler starting up")
 
     tornado.ioloop.IOLoop.instance().start()
 
