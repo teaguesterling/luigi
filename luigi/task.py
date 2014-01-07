@@ -138,6 +138,7 @@ class Register(abc.ABCMeta):
         return global_params.iteritems()
 
 
+
 class Task(object):
     __metaclass__ = Register
 
@@ -149,6 +150,31 @@ class Task(object):
 
     `Task._parameters` - list of (parameter_name, parameter) tuples for this task class
     """
+    _event_callbacks = {}
+
+    @classmethod
+    def event_handler(cls, event):
+        """ Decorator for adding event handlers """
+        def wrapped(callback):
+            cls._event_callbacks.setdefault(cls, {}).setdefault(event, set()).add(callback)
+            return callback
+        return wrapped
+
+    def trigger_event(self, event, *args, **kwargs):
+        """ Trigger that calls all of the specified events associated with this class.
+        """
+        for event_class, event_callbacks in self._event_callbacks.iteritems():
+            if not isinstance(self, event_class):
+                continue
+            for callback in event_callbacks.get(event, []):
+                try:
+                    # callbacks are protected
+                    callback(*args, **kwargs)
+                except KeyboardInterrupt:
+                    return
+                except:
+                    logger.exception("Error in event callback for %r", event)
+                    pass
 
     @property
     def task_family(self):
@@ -261,7 +287,7 @@ class Task(object):
 
         return cls(**kwargs)
 
-    def clone(self, **kwargs):
+    def clone(self, cls=None, **kwargs):
         ''' Creates a new instance from an existing instance where some of the args have changed.
 
         There's at least two scenarios where this is useful (see test/clone_test.py)
@@ -271,12 +297,15 @@ class Task(object):
         k = self.param_kwargs.copy()
         k.update(kwargs.items())
 
-        # remove global params
-        for param_name, param_class in self.get_params():
-            if param_class.is_global:
-                k.pop(param_name)
+        if cls is None:
+            cls = self.__class__
+        
+        new_k = {}
+        for param_name, param_class in cls.get_nonglobal_params():
+            if param_name in k:
+                new_k[param_name] = k[param_name]
 
-        return self.__class__(**k)
+        return cls(**new_k)
 
     def __hash__(self):
         return self.__hash
@@ -347,7 +376,6 @@ class Task(object):
         This method gets called when :py:meth:`run` completes without raising any exceptions.
         The returned value is json encoded and sent to the scheduler as the `expl` argument.
         Default behavior is to send an None value"""
-        return None
 
 
 def externalize(task):
